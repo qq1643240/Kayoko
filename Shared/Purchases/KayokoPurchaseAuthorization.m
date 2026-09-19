@@ -40,7 +40,6 @@ static NSData *KayokoCopyKeychainData(NSString *service, NSString *account, NSSt
 static BOOL KayokoDeleteKeychainItems(NSString *service, NSString *account, NSString *accessGroup, NSError **error);
 static BOOL KayokoSaveKeychainData(NSData *data, NSString *service, NSString *account, NSString *accessGroup,
                                    NSError **error);
-static KayokoHavocCredential *KayokoCopyMirroredCredential(NSError **error);
 static KayokoHavocCredential *KayokoCreateHavocCredential(NSString *token, NSString *providerBaseURL,
                                                           BOOL providerEndpointNeedsResolution, NSString *source,
                                                           NSError **error);
@@ -49,14 +48,6 @@ static KayokoHavocCredential *KayokoCopyZebraHavocCredential(NSError **error);
 static BOOL KayokoSaveMirroredCredential(KayokoHavocCredential *credential, NSError **error);
 static NSError *KayokoCombinedCredentialError(NSError *sileoError, NSError *zebraError);
 static NSString *KayokoCredentialErrorMessage(NSError *error, NSString *fallback);
-static void KayokoCheckPurchaseWithCredential(KayokoHavocCredential *credential,
-                                              void (^completion)(KayokoPurchaseAuthorizationResult *result));
-static void KayokoCheckPurchaseWithProviderBaseURL(KayokoHavocCredential *credential, NSString *providerBaseURL,
-                                                   void (^completion)(KayokoPurchaseAuthorizationResult *result));
-static void KayokoFetchPaymentEndpointForRepositoryURL(NSString *repositoryURLString,
-                                                       void (^completion)(NSString *endpoint, NSError *error,
-                                                                          NSInteger statusCode,
-                                                                          NSString *statusMessage));
 static NSDictionary *KayokoSelectSileoTokenItem(NSArray<NSDictionary *> *tokenItems, NSString *endpoint);
 static NSDictionary *KayokoCopyZebraTokenItem(NSString *service, NSString *accessGroup, NSString *endpoint,
                                               NSError **error);
@@ -68,7 +59,6 @@ static BOOL KayokoProviderBaseURLNeedsEndpointResolution(NSString *providerBaseU
 static BOOL KayokoZebraTokenAccountIsPaymentSecret(NSString *account);
 static NSString *KayokoCopyUniqueDeviceIdentifier(void);
 static NSString *KayokoCopyHardwareMachine(void);
-static NSString *KayokoHTTPStatusMessage(NSInteger statusCode);
 
 @interface KayokoHavocCredential : NSObject
 @property(nonatomic, copy) NSString *token;
@@ -212,165 +202,6 @@ static NSString *KayokoCredentialErrorMessage(NSError *error, NSString *fallback
         message = [message substringToIndex:[message length] - 1];
     }
     return [message length] > 0 ? message : fallback;
-}
-
-#pragma mark - Purchase Check
-
-static void KayokoCheckPurchaseWithCredential(KayokoHavocCredential *credential,
-                                              void (^completion)(KayokoPurchaseAuthorizationResult *result)) {
-    if (!credential.providerEndpointNeedsResolution) {
-        KayokoCheckPurchaseWithProviderBaseURL(credential, credential.providerBaseURL, completion);
-        return;
-    }
-
-    HBLogDebug(@"Kayoko: Havoc authorization resolving payment endpoint repositoryURL=%@", credential.providerBaseURL);
-    NSURL *repositoryURL = [NSURL URLWithString:credential.providerBaseURL];
-    if (!repositoryURL) {
-        HBLogDebug(@"Kayoko: Havoc authorization cannot resolve endpoint because repositoryURL is invalid");
-        KayokoPurchaseAuthorizationResult *result =
-            [[KayokoPurchaseAuthorizationResult alloc] initWithState:KayokoPurchaseAuthorizationStateMissingCredential
-                                                               error:nil
-                                                          statusCode:0
-                                                       statusMessage:nil];
-        completion(result);
-        return;
-    }
-
-    KayokoFetchPaymentEndpointForRepositoryURL(
-        credential.providerBaseURL,
-        ^(NSString *endpoint, NSError *error, NSInteger statusCode, NSString *statusMessage) {
-          if ([endpoint length] == 0) {
-              HBLogDebug(@"Kayoko: Havoc authorization endpoint resolution failed status=%ld statusMessage=%@ "
-                         @"error=%@",
-                         (long)statusCode, statusMessage, error);
-              KayokoPurchaseAuthorizationState state = error ? KayokoPurchaseAuthorizationStateNetworkFailed
-                                                             : KayokoPurchaseAuthorizationStateInvalidResponse;
-              KayokoPurchaseAuthorizationResult *result =
-                  [[KayokoPurchaseAuthorizationResult alloc] initWithState:state
-                                                                     error:error
-                                                                statusCode:statusCode
-                                                             statusMessage:statusMessage];
-              completion(result);
-              return;
-          }
-
-          HBLogDebug(@"Kayoko: Havoc authorization resolved payment endpoint=%@", endpoint);
-          KayokoCheckPurchaseWithProviderBaseURL(credential, endpoint, completion);
-        });
-}
-
-static void KayokoCheckPurchaseWithProviderBaseURL(KayokoHavocCredential *credential, NSString *providerBaseURL,
-                                                   void (^completion)(KayokoPurchaseAuthorizationResult *result)) {
-    NSURL *baseURL = [NSURL URLWithString:providerBaseURL];
-    NSURL *requestURL = [baseURL URLByAppendingPathComponent:@"user_info"];
-    if (!requestURL) {
-        HBLogDebug(@"Kayoko: Havoc authorization cannot create user_info URL providerBaseURL=%@", providerBaseURL);
-        KayokoPurchaseAuthorizationResult *result =
-            [[KayokoPurchaseAuthorizationResult alloc] initWithState:KayokoPurchaseAuthorizationStateMissingCredential
-                                                               error:nil
-                                                          statusCode:0
-                                                       statusMessage:nil];
-        completion(result);
-        return;
-    }
-
-    NSMutableURLRequest *request = [[NSMutableURLRequest alloc] initWithURL:requestURL
-                                                                cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                                            timeoutInterval:15.0];
-    [request setHTTPMethod:@"POST"];
-    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    NSDictionary *body = @{@"token" : credential.token, @"udid" : credential.udid, @"device" : credential.device};
-    NSError *bodyError = nil;
-    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:&bodyError];
-    if (!bodyData) {
-        HBLogDebug(@"Kayoko: Havoc authorization failed to serialize user_info request body error=%@", bodyError);
-        KayokoPurchaseAuthorizationResult *result =
-            [[KayokoPurchaseAuthorizationResult alloc] initWithState:KayokoPurchaseAuthorizationStateInvalidResponse
-                                                               error:bodyError
-                                                          statusCode:0
-                                                       statusMessage:nil];
-        completion(result);
-        return;
-    }
-    [request setHTTPBody:bodyData];
-
-    HBLogDebug(@"Kayoko: Havoc authorization sending user_info request URL=%@ source=%@", requestURL,
-               credential.source ?: @"unknown");
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
-        dataTaskWithRequest:request
-          completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            if (error) {
-                HBLogDebug(@"Kayoko: Havoc authorization user_info request failed error=%@", error);
-                KayokoPurchaseAuthorizationResult *result = [[KayokoPurchaseAuthorizationResult alloc]
-                    initWithState:KayokoPurchaseAuthorizationStateNetworkFailed
-                            error:error
-                       statusCode:0
-                    statusMessage:nil];
-                completion(result);
-                return;
-            }
-
-            NSHTTPURLResponse *HTTPResponse =
-                [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-            NSInteger statusCode = [HTTPResponse statusCode];
-            NSString *statusMessage = KayokoHTTPStatusMessage(statusCode);
-            if (statusCode < 200 || statusCode >= 300 || !data) {
-                HBLogDebug(@"Kayoko: Havoc authorization user_info invalid HTTP response status=%ld "
-                           @"statusMessage=%@ hasData=%@",
-                           (long)statusCode, statusMessage, data ? @"YES" : @"NO");
-                KayokoPurchaseAuthorizationResult *result = [[KayokoPurchaseAuthorizationResult alloc]
-                    initWithState:KayokoPurchaseAuthorizationStateInvalidResponse
-                            error:nil
-                       statusCode:statusCode
-                    statusMessage:statusMessage];
-                completion(result);
-                return;
-            }
-
-            NSError *JSONError = nil;
-            id JSON = [NSJSONSerialization JSONObjectWithData:data options:0 error:&JSONError];
-            NSDictionary *dictionary = [JSON isKindOfClass:[NSDictionary class]] ? JSON : nil;
-            NSArray *items = [dictionary[@"items"] isKindOfClass:[NSArray class]] ? dictionary[@"items"] : nil;
-            if (!dictionary || !items) {
-                HBLogDebug(@"Kayoko: Havoc authorization user_info JSON invalid status=%ld "
-                           @"statusMessage=%@ error=%@ JSONClass=%@",
-                           (long)statusCode, statusMessage, JSONError, NSStringFromClass([JSON class]));
-                KayokoPurchaseAuthorizationResult *result = [[KayokoPurchaseAuthorizationResult alloc]
-                    initWithState:KayokoPurchaseAuthorizationStateInvalidResponse
-                            error:JSONError
-                       statusCode:statusCode
-                    statusMessage:statusMessage];
-                completion(result);
-                return;
-            }
-
-            NSMutableArray<NSString *> *productIdentifiers = [[NSMutableArray alloc] init];
-            for (id item in items) {
-                if ([item isKindOfClass:[NSString class]]) {
-                    [productIdentifiers addObject:item];
-                }
-            }
-            HBLogDebug(@"Kayoko: Havoc authorization purchased product identifiers=%@", productIdentifiers);
-
-            BOOL purchased = NO;
-            for (NSString *productIdentifier in productIdentifiers) {
-                if ([productIdentifier isEqualToString:kKayokoPurchaseAuthorizationProductIdentifier]) {
-                    purchased = YES;
-                    break;
-                }
-            }
-            HBLogDebug(@"Kayoko: Havoc authorization product %@ purchased=%@",
-                       kKayokoPurchaseAuthorizationProductIdentifier, purchased ? @"YES" : @"NO");
-
-            KayokoPurchaseAuthorizationResult *result = [[KayokoPurchaseAuthorizationResult alloc]
-                initWithState:purchased ? KayokoPurchaseAuthorizationStatePurchased
-                                        : KayokoPurchaseAuthorizationStateNotPurchased
-                        error:nil
-                   statusCode:statusCode
-                statusMessage:statusMessage];
-            completion(result);
-          }];
-    [task resume];
 }
 
 #pragma mark - Keychain
@@ -605,52 +436,6 @@ static BOOL KayokoSaveMirroredCredential(KayokoHavocCredential *credential, NSEr
                                   kKayokoAppleAccessGroup, error);
 }
 
-static KayokoHavocCredential *KayokoCopyMirroredCredential(NSError **error) {
-    NSData *data = KayokoCopyKeychainData(kKayokoCredentialMirrorService, kKayokoCredentialMirrorAccount,
-                                          kKayokoAppleAccessGroup, error);
-    if (!data) {
-        if (error && !*error) {
-            *error = KayokoAuthorizationError(kKayokoPurchaseAuthorizationErrorNoCredential,
-                                              @"No mirrored Havoc credential was found.");
-        }
-        return nil;
-    }
-
-    NSError *JSONError = nil;
-    id JSON = [NSJSONSerialization JSONObjectWithData:data options:0 error:&JSONError];
-    NSDictionary *dictionary = [JSON isKindOfClass:[NSDictionary class]] ? JSON : nil;
-    NSString *token = [dictionary[@"token"] isKindOfClass:[NSString class]] ? dictionary[@"token"] : nil;
-    NSString *providerBaseURL =
-        [dictionary[@"providerBaseURL"] isKindOfClass:[NSString class]] ? dictionary[@"providerBaseURL"] : nil;
-    NSString *udid = [dictionary[@"udid"] isKindOfClass:[NSString class]] ? dictionary[@"udid"] : nil;
-    NSString *device = [dictionary[@"device"] isKindOfClass:[NSString class]] ? dictionary[@"device"] : nil;
-    NSNumber *syncedAt = [dictionary[@"syncedAt"] isKindOfClass:[NSNumber class]] ? dictionary[@"syncedAt"] : nil;
-    NSString *source = [dictionary[@"source"] isKindOfClass:[NSString class]] ? dictionary[@"source"] : nil;
-    NSNumber *providerEndpointNeedsResolution =
-        [dictionary[@"providerEndpointNeedsResolution"] isKindOfClass:[NSNumber class]]
-            ? dictionary[@"providerEndpointNeedsResolution"]
-            : nil;
-
-    if ([token length] == 0 || [providerBaseURL length] == 0 || [udid length] == 0 || [device length] == 0) {
-        if (error) {
-            *error = JSONError
-                         ?: KayokoAuthorizationError(kKayokoPurchaseAuthorizationErrorInvalidCredential,
-                                                     @"The mirrored Havoc credential is incomplete.");
-        }
-        return nil;
-    }
-
-    KayokoHavocCredential *credential = [[KayokoHavocCredential alloc] init];
-    credential.token = token;
-    credential.providerBaseURL = KayokoNormalizeProviderBaseURL(providerBaseURL);
-    credential.udid = udid;
-    credential.device = device;
-    credential.source = source;
-    credential.providerEndpointNeedsResolution = [providerEndpointNeedsResolution boolValue];
-    credential.syncedAt = [NSDate dateWithTimeIntervalSince1970:[syncedAt doubleValue]];
-    return credential;
-}
-
 static NSDictionary *KayokoSelectSileoTokenItem(NSArray<NSDictionary *> *tokenItems, NSString *endpoint) {
     NSString *normalizedEndpoint = KayokoNormalizeProviderBaseURL(endpoint);
     for (NSDictionary *item in tokenItems) {
@@ -732,51 +517,6 @@ static NSDictionary *KayokoSelectZebraTokenItem(NSArray<NSDictionary *> *tokenIt
     return [havocCandidates count] == 1 ? [havocCandidates firstObject] : nil;
 }
 
-#pragma mark - Havoc Endpoint
-
-static void KayokoFetchPaymentEndpointForRepositoryURL(NSString *repositoryURLString,
-                                                       void (^completion)(NSString *endpoint, NSError *error,
-                                                                          NSInteger statusCode,
-                                                                          NSString *statusMessage)) {
-    NSURL *baseURL = [NSURL URLWithString:repositoryURLString];
-    NSURL *URL = [baseURL URLByAppendingPathComponent:@"payment_endpoint"];
-    if (!URL) {
-        completion(nil, nil, 0, nil);
-        return;
-    }
-
-    NSMutableURLRequest *request = [[NSMutableURLRequest alloc] initWithURL:URL
-                                                                cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                                            timeoutInterval:8.0];
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
-        dataTaskWithRequest:request
-          completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            NSHTTPURLResponse *HTTPResponse =
-                [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-            if (error) {
-                completion(nil, error, 0, nil);
-                return;
-            }
-
-            NSInteger statusCode = [HTTPResponse statusCode];
-            NSString *statusMessage = KayokoHTTPStatusMessage(statusCode);
-            if (statusCode < 200 || statusCode >= 300 || !data) {
-                completion(nil, nil, statusCode, statusMessage);
-                return;
-            }
-
-            NSString *endpoint = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            endpoint = [endpoint stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if ([endpoint length] == 0 || ![NSURL URLWithString:endpoint]) {
-                completion(nil, nil, statusCode, statusMessage);
-                return;
-            }
-
-            completion(endpoint, nil, statusCode, statusMessage);
-          }];
-    [task resume];
-}
-
 static NSString *KayokoNormalizeProviderBaseURL(NSString *URLString) {
     NSString *normalized =
         [URLString stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -853,16 +593,4 @@ static NSString *KayokoCopyHardwareMachine(void) {
         return nil;
     }
     return [NSString stringWithUTF8String:[data bytes]];
-}
-
-#pragma mark - HTTP
-
-static NSString *KayokoHTTPStatusMessage(NSInteger statusCode) {
-    if (statusCode <= 0) {
-        return nil;
-    }
-
-    NSString *localized = [NSHTTPURLResponse localizedStringForStatusCode:statusCode];
-    NSString *message = [localized length] > 0 ? [localized capitalizedString] : @"HTTP Error";
-    return [NSString stringWithFormat:@"%ld %@", (long)statusCode, message];
 }
