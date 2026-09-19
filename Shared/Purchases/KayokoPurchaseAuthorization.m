@@ -152,14 +152,10 @@ static NSString *KayokoHTTPStatusMessage(NSInteger statusCode);
 #pragma mark - Authorization State
 
 + (BOOL)hasAuthorizationPassFlagWithError:(NSError **)error {
-#if DEBUG
-    HBLogDebug(@"Kayoko: Havoc authorization check for pass flag (DEBUG mode)");
+    (void)error;
+    // Patched: authorization removed — permanently free, always pass.
+    HBLogDebug(@"Kayoko: authorization check bypassed (free build)");
     return YES;
-#else
-    NSData *flagData = KayokoCopyKeychainData(kKayokoAuthorizationFlagService, kKayokoAuthorizationFlagAccount,
-                                              kKayokoAppleAccessGroup, error);
-    return [flagData length] > 0;
-#endif
 }
 
 + (BOOL)setAuthorizationPassFlagWithError:(NSError **)error {
@@ -179,26 +175,17 @@ static NSString *KayokoHTTPStatusMessage(NSInteger statusCode);
 #pragma mark - Purchase Check
 
 + (void)checkMirroredPurchaseWithCompletion:(void (^)(KayokoPurchaseAuthorizationResult *result))completion {
-    HBLogDebug(@"Kayoko: Havoc authorization check started");
-
-    NSError *credentialError = nil;
-    KayokoHavocCredential *credential = KayokoCopyMirroredCredential(&credentialError);
-    if (!credential) {
-        HBLogDebug(@"Kayoko: Havoc authorization check missing mirrored credential error=%@", credentialError);
-        KayokoPurchaseAuthorizationResult *result =
-            [[KayokoPurchaseAuthorizationResult alloc] initWithState:KayokoPurchaseAuthorizationStateMissingCredential
-                                                               error:credentialError
-                                                          statusCode:0
-                                                       statusMessage:nil];
-        completion(result);
+    // Patched: authorization removed — permanently free, always report purchased.
+    HBLogDebug(@"Kayoko: purchase check bypassed (free build)");
+    if (!completion) {
         return;
     }
-
-    HBLogDebug(@"Kayoko: Havoc authorization using mirrored credential source=%@ providerBaseURL=%@ "
-               @"needsEndpointResolution=%@",
-               credential.source ?: @"unknown", credential.providerBaseURL,
-               credential.providerEndpointNeedsResolution ? @"YES" : @"NO");
-    KayokoCheckPurchaseWithCredential(credential, completion);
+    KayokoPurchaseAuthorizationResult *result =
+        [[KayokoPurchaseAuthorizationResult alloc] initWithState:KayokoPurchaseAuthorizationStatePurchased
+                                                           error:nil
+                                                      statusCode:0
+                                                   statusMessage:nil];
+    completion(result);
 }
 
 @end

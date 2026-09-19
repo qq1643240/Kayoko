@@ -886,19 +886,9 @@ NS_ASSUME_NONNULL_END
 }
 
 - (BOOL)authorizationPassedForPanelShow {
-    if ([self hasAuthorizationPassInMemory]) {
-        return YES;
-    }
-
-    NSError *authorizationError = nil;
-    BOOL authorizationPassed = [KayokoPurchaseAuthorization hasAuthorizationPassFlagWithError:&authorizationError];
-    if (authorizationError) {
-        HBLogDebug(@"Kayoko: Authorization pass flag check failed: %@", authorizationError);
-    }
-    if (authorizationPassed) {
-        [self setAuthorizationPassInMemory:YES];
-    }
-    return authorizationPassed;
+    // Patched: authorization removed — permanently free, panel always available.
+    [self setAuthorizationPassInMemory:YES];
+    return YES;
 }
 
 - (void)startLockStateObserver {

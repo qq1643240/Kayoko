@@ -314,29 +314,9 @@ static NSString *const kKayokoLegacyZebraBundleIdentifier = @"xyz.willy.Zebra";
 #pragma mark - Authorization Overlay
 
 - (void)beginAuthorizationCheckIfNeededRestartingExistingOverlay:(BOOL)restartExistingOverlay {
-    if (_authorizationCheckInProgress) {
-        return;
-    }
-
-    NSError *flagError = nil;
-    if ([KayokoPurchaseAuthorization hasAuthorizationPassFlagWithError:&flagError]) {
-        [self dismissAuthorizationOverlayAnimated:NO];
-        return;
-    }
-
-    if (_authorizationOverlayView && !restartExistingOverlay) {
-        return;
-    }
-
-    _authorizationCheckInProgress = YES;
-    NSUInteger generation = ++_authorizationCheckGeneration;
-    [self showAuthorizationOverlayChecking];
-
-    NSString *updaterPath = [self kayokoUpdaterPath];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-      [self runCredentialSyncTaskAtPath:updaterPath];
-      [self checkMirroredPurchaseForGeneration:generation];
-    });
+    // Patched: authorization removed — permanently free, never run the check overlay.
+    (void)restartExistingOverlay;
+    [self dismissAuthorizationOverlayAnimated:NO];
 }
 
 - (void)showAuthorizationOverlayChecking {
